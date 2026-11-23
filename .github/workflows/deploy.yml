@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/cloud-deploy-demo
+  IMAGE: ghcr.io/amanmasood/cloud-deploy-demo  # registry names must be lowercase
 
 jobs:
   test:
@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
-      - run: pip install -r app/requirements.txt pytest
+      - run: pip install -r app/requirements.txt pytest pyyaml
       - run: python -m pytest -q
       - name: ShellCheck
         run: shellcheck -S warning infra/*.sh scripts/*.sh
