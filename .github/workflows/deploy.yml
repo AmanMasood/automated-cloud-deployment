@@ -1,0 +1,64 @@
+name: Build and deploy to EC2
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/cloud-deploy-demo
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -r app/requirements.txt pytest
+      - run: python -m pytest -q
+      - name: ShellCheck
+        run: shellcheck -S warning infra/*.sh scripts/*.sh
+      - name: Validate cloud-init YAML
+        run: python -c "import yaml; yaml.safe_load(open('infra/cloud-init.yaml'))"
+      - name: Nginx config test (rendered template)
+        run: |
+          DOMAIN=example.com envsubst '${DOMAIN}' < nginx/app.conf.template > app.conf
+          sed -i 's/127.0.0.1:8000/localhost:8000/' app.conf
+          docker run --rm -v "$PWD/app.conf:/etc/nginx/conf.d/default.conf:ro" nginx:1.27-alpine nginx -t
+      - name: launch-ec2.sh dry run creates nothing
+        run: KEY_NAME=demo DEPLOY_PUBLIC_KEY="ssh-ed25519 AAAA test" ./infra/launch-ec2.sh | grep -q "Dry run only"
+
+  build:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions: {contents: read, packages: write}
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          TAG=sha-${GITHUB_SHA::7}
+          docker build --build-arg APP_VERSION=$TAG -t $IMAGE:$TAG .
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker push $IMAGE:$TAG
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy over SSH
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          if [[ -z "$EC2_HOST" ]]; then
+            echo "::notice::EC2_HOST not configured - skipping deploy (no paid infrastructure attached to this demo repo)."
+            exit 0
+          fi
+          install -m 600 /dev/null key && echo "$EC2_SSH_KEY" > key
+          scp -i key -o StrictHostKeyChecking=accept-new scripts/deploy.sh deploy@$EC2_HOST:/opt/app/deploy.sh
+          ssh -i key deploy@$EC2_HOST "bash /opt/app/deploy.sh $IMAGE:sha-${GITHUB_SHA::7}"
+          curl -fsS "https://${{ vars.DOMAIN }}/health"
